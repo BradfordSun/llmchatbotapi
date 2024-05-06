@@ -1,0 +1,5 @@
+# CHANGELOG
+
+## [1.0.0] - 2024-05-06
+### Added
+- 初始发布，包括Claude3流式响应和在Dynamodb中读取，删除数据的API

@@ -1,0 +1,6 @@
+fastapi==0.110.2
+PyMySQL==1.1.0
+uvicorn[standard]
+python-multipart
+python-dotenv
+boto3
