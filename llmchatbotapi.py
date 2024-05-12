@@ -46,8 +46,8 @@ def create_bedrock_client():
 async def stream_response(request: Request):
     data = await request.json()
     api_key = data.get("api_key")
-    # if api_key != os.getenv("api_key"):
-    #     raise HTTPException(status_code=401, detail="Unauthorized")
+    if api_key != os.getenv("api_key"):
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
     # image_path = data.get("image_path")
 
@@ -59,7 +59,7 @@ async def stream_response(request: Request):
     model = data.get("model")
     system_prompt = data.get("system_prompt")
     input_text = data.get("input_text")
-    max_tokens = int(100000)  # 默认值为500，可以根据需要调整
+    max_tokens = int(100000)  # 默认值为100000，可以根据需要调整
     temperature = data.get("temperature_value")
     bedrock_client = create_bedrock_client()
     return StreamingResponse(
@@ -76,9 +76,11 @@ async def stream_model_response(bedrock_client, is_new_session, session_id, sess
                                   region_name='us-east-1')
         session_table = dynamodb.Table(os.getenv("session_table"))
         chat_history_table = dynamodb.Table(os.getenv("chat_history_table"))
+        # 记录一个收到前端消息的时间
         received_message_timestamp = int(round(time.time() * 1000))
         messages = []
         if is_new_session:
+            # 新的session的话就要在ddb的session表里面创建记录，最后更新时间先取收到消息的时间（因为必须指定个值）
             session_item = {
                 'sessionID': session_id,
                 'sessionName': session_name,
@@ -86,11 +88,10 @@ async def stream_model_response(bedrock_client, is_new_session, session_id, sess
                 'lastUpdateTimestamp': received_message_timestamp,
                 'user': user,
                 'model': model,
-                # 'systemPrompt': system_prompt
             }
             session_table.put_item(Item=session_item)
         else:
-            # 不是新chat的话就去读取一下历史记录，放到内存里。这里不要显式指定session_id的类型为S，否则会报错
+            # 不是新chat的话就去读取一下chat history表的历史记录，放到内存里。这里不要显式指定session_id的类型为S，否则会报错
             response = chat_history_table.query(
                 KeyConditionExpression='sessionID = :sid',
                 ExpressionAttributeValues={':sid': session_id},
@@ -105,7 +106,7 @@ async def stream_model_response(bedrock_client, is_new_session, session_id, sess
                     "role": "assistant",
                     "content": item.get('assistantMessage', '')
                 })
-        # 最后要追加一个最新的提问
+        # 最后要追加一个最新的提问，加上之前读取的所有历史记录（如果是历史会话），新会话的话就只包含这个用户提问。
         messages.append({
             "role": "user",
             "content": [{"type": "text", "text": input_text}]
@@ -120,16 +121,18 @@ async def stream_model_response(bedrock_client, is_new_session, session_id, sess
 
         response = bedrock_client.invoke_model_with_response_stream(body=body,
                                                                     modelId="anthropic.claude-3-sonnet-20240229-v1:0")
+        # 记录AI返回的消息（将流式传输所有块拼到一起）
         assistant_message = ""
         for event in response.get("body"):
             chunk = json.loads(event["chunk"]["bytes"])
-            # 这段可以输出token
+            # 这段可以输出token？
             # if chunk['type'] == 'message_delta':
             #     yield f"Output tokens: {chunk['usage']['output_tokens']}\n"
             if chunk['type'] == 'content_block_delta' and chunk['delta']['type'] == 'text_delta':
+                # 文本的话就流式传输yield到前端，并且将返回的块追加到消息记录
                 assistant_message += chunk['delta']['text']
                 yield chunk['delta']['text']
-            # 表示写完了
+            # 以下表示写完了，就更新下session表里的lastUpdateTimestamp
             elif chunk['type'] == 'message_delta':
                 sent_message_timestamp = int(round(time.time() * 1000))
                 dynamodb_client = boto3.client('dynamodb', aws_access_key_id=os.getenv("ddb_ak"),
@@ -146,6 +149,7 @@ async def stream_model_response(bedrock_client, is_new_session, session_id, sess
                     },
                     # ReturnValues="UPDATED_NEW"  # 可以指定返回值选项
                 )
+                # 以下记录是将用户消息和AI消息记录到chat history表里，并且记录停止原因
                 if chunk['delta']['stop_reason'] == 'end_turn':
                     message_item = {
                         'sessionID': session_id,
@@ -188,14 +192,14 @@ async def stream_model_response(bedrock_client, is_new_session, session_id, sess
 @app.get("/sessions/")
 async def get_sessions(user: str = Query(..., description="User ID to filter sessions"),
                        model: str = Query(..., description="Model name to filter sessions")):
-    # 使用 DynamoDB 查询数据
+    # 使用 DynamoDB 查询session数据
     try:
         dynamodb = boto3.resource('dynamodb', aws_access_key_id=os.getenv("ddb_ak"),
                                   aws_secret_access_key=os.getenv("ddb_sk"),
                                   region_name='us-east-1')
         table = dynamodb.Table(os.getenv("session_table"))
         response = table.query(
-            IndexName='UserModelIndex',  # 假设这是您已经创建的 GSI
+            IndexName='UserModelIndex',  # 这是已经创建的 GSI
             KeyConditionExpression=Key('user').eq(user) & Key('model').eq(model)
         )
         items = response['Items']
@@ -212,6 +216,7 @@ async def get_sessions(user: str = Query(..., description="User ID to filter ses
 
 @app.delete("/sessions/")
 async def delete_sessions(session_id: str = Query(..., description="Session ID to filter sessions")):
+    # 删除某一个session
     try:
         dynamodb = boto3.resource('dynamodb', aws_access_key_id=os.getenv("ddb_ak"),
                                   aws_secret_access_key=os.getenv("ddb_sk"),
@@ -227,6 +232,7 @@ async def delete_sessions(session_id: str = Query(..., description="Session ID t
             KeyConditionExpression='sessionID = :sid',
             ExpressionAttributeValues={':sid': session_id},
         )
+        # 轮询chat history表，删除所有session id为传过来的值的item，还必须指定排序键，要不不能删
         for item in response.get('Items', []):
             chat_history_table.delete_item(
                 Key={
@@ -234,6 +240,7 @@ async def delete_sessions(session_id: str = Query(..., description="Session ID t
                     'receivedMessageTimestamp': item['receivedMessageTimestamp']
                 }
             )
+        # 删除成功回success，前端用
         return {"status": "success"}
     except Exception as e:
         print(e)
@@ -242,7 +249,7 @@ async def delete_sessions(session_id: str = Query(..., description="Session ID t
 
 @app.get("/chathistory/")
 async def get_sessions(session_id: str = Query(..., description="Session ID to filter sessions")):
-    # 使用 DynamoDB 查询数据
+    # 使用 DynamoDB 查询聊天历史
     try:
         chat_history = []
         dynamodb = boto3.resource('dynamodb', aws_access_key_id=os.getenv("ddb_ak"),
@@ -255,10 +262,7 @@ async def get_sessions(session_id: str = Query(..., description="Session ID to f
             ScanIndexForward=True  # True 表示按排序键 receivedMessageTimestamp 升序排列
         )
         for item in response.get('Items', []):
-            # message_detail = {
-            #     "userMessage": item.get("userMessage", ""),
-            #     "assistantMessage": item.get("assistantMessage", "")
-            # }
+            # 先放用户消息，再放AI消息
             user_message = {"sender": "You", "texts": [item.get("userMessage", "")]}
             chat_history.append(user_message)
             assistant_message = {"sender": "AI", "texts": [item.get("assistantMessage", "")]}
