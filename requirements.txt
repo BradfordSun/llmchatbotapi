@@ -1,5 +1,4 @@
-fastapi==0.110.2
-PyMySQL==1.1.0
+fastapi
 uvicorn[standard]
 python-multipart
 python-dotenv

@@ -17,4 +17,5 @@ COPY . .
 EXPOSE 8000
 
 # 启动应用程序
-CMD ["uvicorn", "llmchatbotapi:app", "--host", "0.0.0.0", "--port", "8000"]
+#CMD ["uvicorn", "llmchatbotapi:app", "--host", "0.0.0.0", "--port", "8000","--reload"]
+CMD ["python", "llmchatbotapi.py"]

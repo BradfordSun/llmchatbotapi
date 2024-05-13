@@ -1,5 +1,7 @@
 import time
 import datetime
+
+import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Query
 from fastapi.responses import StreamingResponse
 import json
@@ -42,7 +44,7 @@ def create_bedrock_client():
                         aws_secret_access_key=os.getenv("bedrock_sk"), region_name="us-east-1")
 
 
-@app.post("/stream-response/")
+@app.post("/stream-response")
 async def stream_response(request: Request):
     data = await request.json()
     api_key = data.get("api_key")
@@ -68,7 +70,7 @@ async def stream_response(request: Request):
         media_type="text/event-stream")
 
 
-async def stream_model_response(bedrock_client, is_new_session, session_id, session_name, start_timestamp, user, model,
+def stream_model_response(bedrock_client, is_new_session, session_id, session_name, start_timestamp, user, model,
                                 system_prompt, input_text, max_tokens, temperature):
     try:
         dynamodb = boto3.resource('dynamodb', aws_access_key_id=os.getenv("ddb_ak"),
@@ -189,7 +191,7 @@ async def stream_model_response(bedrock_client, is_new_session, session_id, sess
         raise HTTPException(status_code=500, detail=f"Client error: {message}")
 
 
-@app.get("/sessions/")
+@app.get("/sessions")
 async def get_sessions(user: str = Query(..., description="User ID to filter sessions"),
                        model: str = Query(..., description="Model name to filter sessions")):
     # 使用 DynamoDB 查询session数据
@@ -214,7 +216,7 @@ async def get_sessions(user: str = Query(..., description="User ID to filter ses
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.delete("/sessions/")
+@app.delete("/sessions")
 async def delete_sessions(session_id: str = Query(..., description="Session ID to filter sessions")):
     # 删除某一个session
     try:
@@ -247,7 +249,7 @@ async def delete_sessions(session_id: str = Query(..., description="Session ID t
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/chathistory/")
+@app.get("/chathistory")
 async def get_sessions(session_id: str = Query(..., description="Session ID to filter sessions")):
     # 使用 DynamoDB 查询聊天历史
     try:
@@ -270,3 +272,6 @@ async def get_sessions(session_id: str = Query(..., description="Session ID to f
         return chat_history
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    uvicorn.run("llmchatbotapi:app", host="0.0.0.0", port=8000)
